@@ -2,19 +2,17 @@ from flask import Flask, request, jsonify
 import requests
 import random
 import os
+import time
 
 app = Flask(__name__)
 
-# 你的API密钥（共10个，5个旧的 + 5个新的）
+# 你的Gemini API密钥（10个）
 API_KEYS = [
-    # 旧的5个密钥
     "AIzaSyCHeiybyzsycc4E4w4updI_vyIs2sWjfvU",
     "AIzaSyBVmvlMmMjBL6KBLBUSGSGv5Nr5i-cNGCI",
     "AIzaSyAo1QC_AjP0ar3EUH9fNATdaFt0TSYCqJo",
     "AIzaSyDYEuWwquFr34NpLJhRPM7burIaagKSJVE",
     "AIzaSyA0f3cvCTzEQGEJRJY8aWDdu4f1dB1b3rA",
-    
-    # 新的5个密钥
     "AIzaSyAzDjrvFnesAz9SVXTjw9yFXMYEJ0NXBRs",
     "AIzaSyCM_HGmia2FglB0IY_c7ASsN5T0nPhQkD0",
     "AIzaSyCrVlImdVowrTTaSaFe0rIOL5Ppe7KSZXQ",
@@ -25,18 +23,17 @@ API_KEYS = [
 @app.route('/')
 def home():
     return '''
-    <h1>✅ Gemini API 代理运行成功！</h1>
-    <p>使用方法：</p>
-    <ul>
-        <li><strong>GET /</strong> - 本页面</li>
-        <li><strong>POST /chat</strong> - 聊天接口</li>
-        <li><strong>GET /health</strong> - 健康检查</li>
-    </ul>
-    <p>示例请求：</p>
+    <h1>✅ Gemini代理（astrbot专用版）</h1>
+    <p><strong>astrbot配置：</strong></p>
     <pre>
-curl -X POST https://你的网址.zeabur.app/chat \\
-  -H "Content-Type: application/json" \\
-  -d '{"prompt": "你好"}'
+    API类型: OpenAI
+    API地址: https://nyaa.zeabur.app/v1
+    API密钥: sk-123456（随便填）
+    模型: gemini-pro
+    </pre>
+    <p>或直接使用：</p>
+    <pre>
+    API地址: https://nyaa.zeabur.app/v1/chat/completions
     </pre>
     '''
 
@@ -44,27 +41,37 @@ curl -X POST https://你的网址.zeabur.app/chat \\
 def health():
     return jsonify({
         "status": "healthy",
-        "service": "Gemini API Proxy",
+        "service": "Gemini Proxy for astrbot",
         "keys_count": len(API_KEYS)
     })
 
-@app.route('/chat', methods=['POST'])
-def chat():
-    """处理聊天请求"""
+@app.route('/v1/chat/completions', methods=['POST'])
+def openai_compatible():
+    """OpenAI兼容接口 - astrbot使用这个"""
     try:
         # 获取请求数据
         data = request.get_json()
         if not data:
             return jsonify({"error": "需要JSON数据"}), 400
         
-        prompt = data.get('prompt', '你好')
-        model = data.get('model', 'gemini-pro')
+        # 提取消息（OpenAI格式）
+        messages = data.get('messages', [])
+        prompt = ""
+        for msg in messages:
+            role = msg.get('role', 'user')
+            content = msg.get('content', '')
+            if content:
+                prompt += f"{role}: {content}\n"
         
-        # 随机选择一个API密钥
+        # 如果没有messages，尝试其他字段
+        if not prompt:
+            prompt = data.get('prompt', '你好')
+        
+        # 随机选择Gemini API密钥
         api_key = random.choice(API_KEYS)
         
-        # 构建Gemini API请求
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+        # 调用Gemini API
+        url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent"
         params = {"key": api_key}
         
         payload = {
@@ -73,32 +80,78 @@ def chat():
             }]
         }
         
-        # 添加可选参数
-        if 'temperature' in data:
-            payload['generationConfig'] = {'temperature': data['temperature']}
-        
-        # 发送请求
+        # 发送请求到Gemini
         response = requests.post(url, params=params, json=payload, timeout=30)
         
-        # 检查响应
+        # 处理响应
         if response.status_code == 200:
-            return jsonify(response.json())
-        elif response.status_code in [403, 429]:
-            # 密钥可能被限制，可以在这里添加重试逻辑
+            result = response.json()
+            reply_text = result['candidates'][0]['content']['parts'][0]['text']
+            
+            # 转换为OpenAI格式
             return jsonify({
-                "error": "API限制",
-                "message": "当前密钥可能达到限制，请稍后重试",
-                "status_code": response.status_code
-            }), 429
+                "id": f"chatcmpl-{random.randint(100000, 999999)}",
+                "object": "chat.completion",
+                "created": int(time.time()),
+                "model": "gemini-pro",
+                "choices": [{
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": reply_text
+                    },
+                    "finish_reason": "stop"
+                }],
+                "usage": {
+                    "prompt_tokens": len(prompt),
+                    "completion_tokens": len(reply_text),
+                    "total_tokens": len(prompt) + len(reply_text)
+                }
+            })
         else:
             return jsonify({
-                "error": "API请求失败",
-                "status_code": response.status_code,
-                "message": response.text[:200]
+                "error": {
+                    "message": f"Gemini API错误: {response.status_code}",
+                    "type": "api_error",
+                    "details": response.text[:200]
+                }
             }), 500
             
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return jsonify({
+            "error": {
+                "message": str(e),
+                "type": "internal_error"
+            }
+        }), 500
+
+@app.route('/v1/models', methods=['GET'])
+def list_models():
+    """返回支持的模型列表（OpenAI兼容）"""
+    return jsonify({
+        "object": "list",
+        "data": [
+            {
+                "id": "gemini-pro",
+                "object": "model",
+                "created": 1686935000,
+                "owned_by": "google"
+            }
+        ]
+    })
+
+# 保留旧接口（可选）
+@app.route('/chat', methods=['POST'])
+def simple_chat():
+    """简单聊天接口（兼容旧版）"""
+    try:
+        data = request.get_json()
+        prompt = data.get('prompt', '你好')
+        
+        # 重定向到OpenAI接口
+        return openai_compatible()
+    except:
+        return jsonify({"error": "请使用/v1/chat/completions接口"}), 400
 
 if __name__ == '__main__':
     port = int(os.getenv('PORT', 5000))
